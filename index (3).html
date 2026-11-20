@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Mock Interview Assistant</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: Arial, sans-serif; background: #f3f4f8; margin: 0; padding: 20px; color: #222; }
+  .container { max-width: 760px; margin: auto; background: #fff; padding: 28px; border-radius: 14px; box-shadow: 0 4px 16px rgba(0,0,0,.08); }
+  h1 { margin-top: 0; color: #3b3bb3; }
+  label { display: block; margin: 14px 0 6px; font-weight: bold; }
+  input, select, textarea { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 8px; font-size: 15px; font-family: inherit; }
+  textarea { height: 90px; resize: vertical; }
+  button { margin-top: 16px; padding: 12px 20px; background: #3b3bb3; color: #fff; border: 0; border-radius: 8px; font-size: 16px; cursor: pointer; }
+  button:hover { background: #2d2d94; }
+  button:disabled { background: #999; cursor: wait; }
+  .q { margin-top: 20px; font-weight: bold; }
+  .card { margin-top: 20px; padding: 16px; border: 1px solid #ddd; border-radius: 10px; }
+  .score { font-size: 22px; font-weight: bold; color: #3b3bb3; }
+  .good { background: #e6f6ea; padding: 10px; border-radius: 8px; margin-top: 8px; }
+  .missing { background: #fff4e0; padding: 10px; border-radius: 8px; margin-top: 8px; }
+  .sample { background: #e8f0fe; padding: 10px; border-radius: 8px; margin-top: 8px; }
+  .error { background: #fde8e8; color: #a00; padding: 10px; border-radius: 8px; margin-top: 12px; }
+  .hint { font-size: 13px; color: #666; }
+  .hidden { display: none; }
+  .total { margin-top: 24px; font-size: 22px; font-weight: bold; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🎤 AI Mock Interview Assistant</h1>
+  <p>Practice interview questions for your job role and get instant feedback.</p>
+  <div class="hint">App version 3 (if you do not see this line, you are opening the OLD file)</div>
+
+  <label for="apikey">Gemini API key</label>
+  <input id="apikey" type="password" placeholder="Paste your key here (free from aistudio.google.com)">
+  <div class="hint">Your key stays in your browser. It is not saved in this file.</div>
+
+  <label for="role">Job role</label>
+  <input id="role" placeholder="e.g. Python Developer, Data Analyst, Web Developer">
+
+  <label for="level">Level</label>
+  <select id="level"><option>Fresher</option><option>Experienced</option></select>
+
+  <button id="genBtn" onclick="generateQuestions()">Generate 5 Interview Questions</button>
+  <div id="error" class="error hidden"></div>
+
+  <div id="questionsBox" class="hidden">
+    <h2>Your Interview Questions</h2>
+    <div id="questions"></div>
+    <button id="fbBtn" onclick="getFeedback()">Get Feedback</button>
+  </div>
+
+  <div id="feedbackBox" class="hidden">
+    <h2>Your Feedback</h2>
+    <div id="feedback"></div>
+    <div id="total" class="total"></div>
+  </div>
+</div>
+
+<script>
+  var MODELS = ["gemini-3.8-flash", "gemini-flash-latest"];  // tried first; others are found automatically
+  var questions = [];
+  var usedRole = "", usedLevel = "";
+
+  function showError(msg) {
+    var e = document.getElementById("error");
+    e.textContent = msg;
+    e.classList.toggle("hidden", !msg);
+  }
+
+  function escapeHtml(t) {
+    var d = document.createElement("div");
+    d.textContent = (t === undefined || t === null) ? "" : String(t);
+    return d.innerHTML;
+  }
+
+  // Asks Google which flash models this key can use (so we never use a retired model name)
+  async function findModels(key) {
+    try {
+      var res = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=" + encodeURIComponent(key));
+      var data = await res.json();
+      return (data.models || [])
+        .filter(function (m) {
+          var n = m.name.toLowerCase();
+          return n.indexOf("flash") !== -1 && !/lite|image|tts|live|audio|embed|thinking|vision/.test(n) &&
+            (m.supportedGenerationMethods || []).indexOf("generateContent") !== -1;
+        })
+        .map(function (m) { return m.name.replace("models/", ""); })
+        .reverse();
+    } catch (e) { return []; }
+  }
+
+  // Sends the prompt to Gemini and returns the reply as a JavaScript object (from JSON)
+  async function askGemini(prompt) {
+    var key = document.getElementById("apikey").value.trim();
+    if (!key) throw new Error("Please paste your Gemini API key first.");
+    var candidates = MODELS.slice();
+    var errors = [];
+    var triedDiscovery = false;
+    for (var i = 0; i < candidates.length; i++) {
+      try {
+        var url = "https://generativelanguage.googleapis.com/v1beta/models/" + candidates[i] + ":generateContent?key=" + encodeURIComponent(key);
+        var res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { responseMimeType: "application/json" }
+          })
+        });
+        var data = await res.json();
+        if (!res.ok) throw new Error((data.error && data.error.message) || "Request failed");
+        var text = data.candidates[0].content.parts[0].text.trim();
+        text = text.replace(/^```json/i, "").replace(/^```/, "").replace(/```$/, "").trim();
+        return JSON.parse(text);
+      } catch (err) {
+        errors.push(candidates[i] + ": " + err.message);
+        // after the first two names fail, ask Google which models are available
+        if (i === candidates.length - 1 && !triedDiscovery) {
+          triedDiscovery = true;
+          var found = await findModels(key);
+          found.forEach(function (m) { if (candidates.indexOf(m) === -1) candidates.push(m); });
+        }
+      }
+    }
+    throw new Error(errors.slice(0, 5).join("  ||  "));
+  }
+
+  async function generateQuestions() {
+    showError("");
+    var role = document.getElementById("role").value.trim();
+    var level = document.getElementById("level").value;
+    if (!role) { showError("Please enter a job role."); return; }
+    var btn = document.getElementById("genBtn");
+    btn.disabled = true; btn.textContent = "Preparing your questions...";
+    try {
+      var prompt = "You are an interviewer. Create exactly 5 interview questions for a " + level + " " + role +
+        ". Include a mix of technical and HR questions. Return ONLY a JSON list of 5 strings.";
+      var result = await askGemini(prompt);
+      questions = result.slice(0, 5).map(function (q) { return typeof q === "string" ? q : (q.question || JSON.stringify(q)); });
+      usedRole = role; usedLevel = level;
+      var html = "";
+      questions.forEach(function (q, i) {
+        html += '<div class="q">Q' + (i + 1) + ". " + escapeHtml(q) + '</div><textarea id="ans' + i + '" placeholder="Type your answer here"></textarea>';
+      });
+      document.getElementById("questions").innerHTML = html;
+      document.getElementById("questionsBox").classList.remove("hidden");
+      document.getElementById("feedbackBox").classList.add("hidden");
+    } catch (err) {
+      showError("Could not get questions. Check your API key and internet. (" + err.message + ")");
+    }
+    btn.disabled = false; btn.textContent = "Generate 5 Interview Questions";
+  }
+
+  async function getFeedback() {
+    showError("");
+    var btn = document.getElementById("fbBtn");
+    btn.disabled = true; btn.textContent = "Checking your answers...";
+    try {
+      var qa = "";
+      questions.forEach(function (q, i) {
+        var a = document.getElementById("ans" + i).value.trim() || "(no answer given)";
+        qa += "Question: " + q + "\nAnswer: " + a + "\n\n";
+      });
+      var prompt = "You are an interviewer for a " + usedLevel + " " + usedRole + " position. Evaluate each answer below. " +
+        'Return ONLY a JSON list with one object per question, with these keys: "question", "score" (a number from 0 to 10), ' +
+        '"good" (what was good), "missing" (what was missing), "sample_answer" (a better sample answer).\n\n' + qa;
+      var items = await askGemini(prompt);
+      var total = 0, html = "";
+      items.forEach(function (it, i) {
+        var s = parseFloat(it.score); if (isNaN(s)) s = 0;
+        total += s;
+        html += '<div class="card"><div class="q">Q' + (i + 1) + ". " + escapeHtml(it.question) + "</div>" +
+          '<div class="score">Score: ' + s + "/10</div>" +
+          '<div class="good">✅ <b>Good:</b> ' + escapeHtml(it.good) + "</div>" +
+          '<div class="missing">⚠️ <b>Missing:</b> ' + escapeHtml(it.missing) + "</div>" +
+          '<div class="sample">💡 <b>Sample better answer:</b> ' + escapeHtml(it.sample_answer) + "</div></div>";
+      });
+      document.getElementById("feedback").innerHTML = html;
+      document.getElementById("total").textContent = "Total Score: " + total + "/" + (items.length * 10);
+      document.getElementById("feedbackBox").classList.remove("hidden");
+      document.getElementById("feedbackBox").scrollIntoView({ behavior: "smooth" });
+    } catch (err) {
+      showError("Could not get feedback. Please try again. (" + err.message + ")");
+    }
+    btn.disabled = false; btn.textContent = "Get Feedback";
+  }
+</script>
+</body>
+</html>
